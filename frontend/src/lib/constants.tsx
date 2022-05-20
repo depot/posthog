@@ -116,8 +116,12 @@ export const FEATURE_FLAGS = {
     LEMON_FUNNEL_VIZ: 'lemon-funnel-viz', // owner: @Twixes
     KAFKA_INSPECTOR: 'kafka-inspector', // owner: @yakkomajuri
     ONBOARDING_1: 'onboarding-1', // owner: @liyiy
+    INSIGHT_EDITOR_PANELS: '8929-insight-editor-panels', // owner: @mariusandra
     MULTI_DASHBOARD_INSIGHTS: 'multi-dashboard-insights', // owner: @pauldambra
     INSIGHT_ACTIVITY_LOG: '8545-insight-activity-log', // owner: @pauldambra
+    COHORT_FILTERS: 'cohort-filters', // owner: @edscode
+    FRONTEND_APPS: '9618-frontend-apps', // owner: @mariusandra
+    PROPERTY_FILTER_ON_DASHBOARD: 'property-filter-on-dashboard', // owner: @edscode
 }
 
 /** Which self-hosted plan's features are available with Cloud's "Standard" plan (aka card attached). */
@@ -134,6 +138,8 @@ export const FEATURE_MINIMUM_PLAN: Record<AvailableFeature, LicensePlan> = {
     [AvailableFeature.MULTIVARIATE_FLAGS]: LicensePlan.Scale,
     [AvailableFeature.EXPERIMENTATION]: LicensePlan.Scale,
     [AvailableFeature.TAGGING]: LicensePlan.Scale,
+    [AvailableFeature.BEHAVIORAL_COHORT_FILTERING]: LicensePlan.Scale,
+    [AvailableFeature.WHITE_LABELLING]: LicensePlan.Scale,
     [AvailableFeature.DASHBOARD_PERMISSIONING]: LicensePlan.Enterprise,
     [AvailableFeature.PROJECT_BASED_PERMISSIONING]: LicensePlan.Enterprise,
     [AvailableFeature.SAML]: LicensePlan.Enterprise,

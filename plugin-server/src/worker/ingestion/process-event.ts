@@ -77,8 +77,8 @@ export interface EventProcessingResult {
 export class EventsProcessor {
     pluginsServer: Hub
     db: DB
-    clickhouse: ClickHouse | undefined
-    kafkaProducer: KafkaProducerWrapper | undefined
+    clickhouse: ClickHouse
+    kafkaProducer: KafkaProducerWrapper
     celery: Client
     teamManager: TeamManager
     personManager: PersonManager
@@ -106,7 +106,8 @@ export class EventsProcessor {
         teamId: number,
         now: DateTime,
         sentAt: DateTime | null,
-        eventUuid: string
+        eventUuid: string,
+        siteUrl: string
     ): Promise<PreIngestionEvent | null> {
         if (!UUID.validateString(eventUuid, false)) {
             throw new Error(`Not a valid UUID: "${eventUuid}"`)
@@ -158,7 +159,7 @@ export class EventsProcessor {
                         { eventUuid }
                     )
                     try {
-                        await this.createSessionRecordingEvent(
+                        result = await this.createSessionRecordingEvent(
                             eventUuid,
                             teamId,
                             distinctId,
@@ -166,7 +167,10 @@ export class EventsProcessor {
                             properties['$window_id'],
                             ts,
                             properties['$snapshot_data'],
-                            personUuid
+                            properties,
+                            personUuid,
+                            ip,
+                            siteUrl
                         )
                         this.pluginsServer.statsd?.timing('kafka_queue.single_save.snapshot', singleSaveTimer, {
                             team_id: teamId.toString(),
@@ -187,7 +191,8 @@ export class EventsProcessor {
                         data['event'],
                         distinctId,
                         properties,
-                        ts
+                        ts,
+                        siteUrl
                     )
                     this.pluginsServer.statsd?.timing('kafka_queue.single_save.standard', singleSaveTimer, {
                         team_id: teamId.toString(),
@@ -506,7 +511,7 @@ export class EventsProcessor {
             }
         })
 
-        if (this.kafkaProducer) {
+        if (this.pluginsServer.KAFKA_ENABLED) {
             await this.kafkaProducer.queueMessages(kafkaMessages)
         }
     }
@@ -519,7 +524,8 @@ export class EventsProcessor {
         event: string,
         distinctId: string,
         properties: Properties,
-        timestamp: DateTime
+        timestamp: DateTime,
+        siteUrl: string
     ): Promise<PreIngestionEvent> {
         event = sanitizeEventName(event)
         const elements: Record<string, any>[] | undefined = properties['$elements']
@@ -565,11 +571,13 @@ export class EventsProcessor {
         return {
             eventUuid,
             event,
+            ip,
             distinctId,
             properties,
             timestamp,
             elementsList,
             teamId: team.id,
+            siteUrl,
         }
     }
 
@@ -605,13 +613,13 @@ export class EventsProcessor {
         const personInfo = await this.db.getPersonData(teamId, distinctId)
         const groupProperties = await this.db.getGroupProperties(teamId, this.getGroupIdentifiers(properties))
 
-        let eventPersonProperties: Properties | null = null
+        let eventPersonProperties: string | null = null
         if (personInfo) {
             // For consistency, we'd like events to contain the properties that they set, even if those were changed
             // before the event is ingested. Thus we fetch the updated properties but override the values with the event's
             // $set properties if they exist.
-            const latestPersonProperties = personInfo ? JSON.stringify(personInfo?.properties) : {}
-            eventPersonProperties = { ...latestPersonProperties, ...(properties.$set || {}) }
+            const latestPersonProperties = personInfo ? personInfo?.properties : {}
+            eventPersonProperties = JSON.stringify({ ...latestPersonProperties, ...(properties.$set || {}) })
         }
 
         const eventPayload: IEvent = {
@@ -627,7 +635,7 @@ export class EventsProcessor {
 
         let eventId: Event['id'] | undefined
 
-        if (this.kafkaProducer) {
+        if (this.pluginsServer.KAFKA_ENABLED) {
             const useExternalSchemas = this.clickhouseExternalSchemasEnabled(teamId)
             // proto ingestion is deprecated and we won't support new additions to the schema
             const message = useExternalSchemas
@@ -678,7 +686,7 @@ export class EventsProcessor {
     }
 
     async produceEventToBuffer(bufferEvent: PreIngestionEvent): Promise<void> {
-        if (this.kafkaProducer) {
+        if (this.pluginsServer.KAFKA_ENABLED) {
             const partitionKeyHash = crypto.createHash('sha256')
             partitionKeyHash.update(`${bufferEvent.teamId}:${bufferEvent.distinctId}`)
             const partitionKey = partitionKeyHash.digest('hex')
@@ -703,8 +711,11 @@ export class EventsProcessor {
         window_id: string,
         timestamp: DateTime,
         snapshot_data: Record<any, any>,
-        personUuid: string
-    ): Promise<SessionRecordingEvent | PostgresSessionRecordingEvent> {
+        properties: Properties,
+        personUuid: string,
+        ip: string | null,
+        siteUrl: string
+    ): Promise<PreIngestionEvent> {
         const timestampString = castTimestampOrNow(
             timestamp,
             this.kafkaProducer ? TimestampFormat.ClickHouse : TimestampFormat.ISO
@@ -723,7 +734,7 @@ export class EventsProcessor {
             created_at: timestampString,
         }
 
-        if (this.kafkaProducer) {
+        if (this.pluginsServer.KAFKA_ENABLED) {
             await this.kafkaProducer.queueMessage({
                 topic: KAFKA_SESSION_RECORDING_EVENTS,
                 messages: [{ key: uuid, value: Buffer.from(JSON.stringify(data)) }],
@@ -744,9 +755,19 @@ export class EventsProcessor {
                 ],
                 'insertSessionRecording'
             )
-            return eventCreated as PostgresSessionRecordingEvent
         }
-        return data
+
+        return {
+            eventUuid: uuid,
+            event: '$snapshot',
+            ip,
+            distinctId: distinct_id,
+            properties,
+            timestamp: timestampString,
+            elementsList: [],
+            teamId: team_id,
+            siteUrl,
+        }
     }
 
     private async createPersonIfDistinctIdIsNew(

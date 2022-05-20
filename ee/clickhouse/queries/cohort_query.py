@@ -1,9 +1,10 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from ee.clickhouse.materialized_columns.columns import ColumnName
-from ee.clickhouse.models.cohort import format_filter_query, get_count_operator, get_entity_query
+from ee.clickhouse.models.cohort import format_static_cohort_query, get_count_operator, get_entity_query
 from ee.clickhouse.models.property import prop_filter_json_extract
 from ee.clickhouse.queries.event_query import EnterpriseEventQuery
+from posthog.constants import PropertyOperatorType
 from posthog.models import Filter, Team
 from posthog.models.action import Action
 from posthog.models.cohort import Cohort
@@ -108,6 +109,32 @@ def if_condition(condition: str, true_res: str, false_res: str) -> str:
     return f"if({condition}, {true_res}, {false_res})"
 
 
+def check_negation_clause(prop: PropertyGroup) -> Tuple[bool, bool]:
+    has_negation_clause = False
+    has_primary_clase = False
+    if len(prop.values):
+        if isinstance(prop.values[0], PropertyGroup):
+            for p in cast(List[PropertyGroup], prop.values):
+                has_neg, has_primary = check_negation_clause(p)
+                has_negation_clause = has_negation_clause or has_neg
+                has_primary_clase = has_primary_clase or has_primary
+
+        else:
+            for property in cast(List[Property], prop.values):
+                if property.negation:
+                    has_negation_clause = True
+                else:
+                    has_primary_clase = True
+
+        if prop.type == PropertyOperatorType.AND and has_negation_clause and has_primary_clase:
+            # this negation is valid, since all conditions are met.
+            # So, we don't need to pair this with anything in the rest of the tree
+            # return no negations, and yes to primary clauses
+            return False, True
+
+    return has_negation_clause, has_primary_clase
+
+
 class CohortQuery(EnterpriseEventQuery):
 
     BEHAVIOR_QUERY_ALIAS = "behavior_query"
@@ -139,8 +166,9 @@ class CohortQuery(EnterpriseEventQuery):
         self._earliest_time_for_event_query = None
         self._restrict_event_query_by_time = True
         self._cohort_pk = cohort_pk
+
         super().__init__(
-            filter=filter,
+            filter=CohortQuery.unwrap_cohort(filter, team.pk),
             team=team,
             round_interval=round_interval,
             should_join_distinct_ids=should_join_distinct_ids,
@@ -157,6 +185,80 @@ class CohortQuery(EnterpriseEventQuery):
         property_groups = self._column_optimizer.property_optimizer.parse_property_groups(self._filter.property_groups)
         self._inner_property_groups = property_groups.inner
         self._outer_property_groups = property_groups.outer
+
+    @staticmethod
+    def unwrap_cohort(filter: Filter, team_id: int) -> Filter:
+        def _unwrap(property_group: PropertyGroup, negate_group: bool = False) -> PropertyGroup:
+            if len(property_group.values):
+                if isinstance(property_group.values[0], PropertyGroup):
+                    # dealing with a list of property groups, so unwrap each one
+                    # Propogate the negation to the children and handle as necessary with respect to deMorgan's law
+                    if not negate_group:
+                        return PropertyGroup(
+                            type=property_group.type,
+                            values=[_unwrap(v) for v in cast(List[PropertyGroup], property_group.values)],
+                        )
+                    else:
+                        return PropertyGroup(
+                            type=PropertyOperatorType.AND
+                            if property_group.type == PropertyOperatorType.OR
+                            else PropertyOperatorType.OR,
+                            values=[_unwrap(v, True) for v in cast(List[PropertyGroup], property_group.values)],
+                        )
+
+                elif isinstance(property_group.values[0], Property):
+                    # dealing with a list of properties
+                    # if any single one is a cohort property, unwrap it into a property group
+                    # which implies converting everything else in the list into a property group too
+
+                    new_property_group_list: List[PropertyGroup] = []
+                    for prop in property_group.values:
+                        prop = cast(Property, prop)
+                        current_negation = prop.negation or False
+                        negation_value = not current_negation if negate_group else current_negation
+                        if prop.type in ["cohort", "precalculated-cohort"]:
+                            try:
+                                prop_cohort: Cohort = Cohort.objects.get(pk=prop.value, team_id=team_id)
+                                if prop_cohort.is_static:
+                                    new_property_group_list.append(
+                                        PropertyGroup(
+                                            type=PropertyOperatorType.AND,
+                                            values=[
+                                                Property(
+                                                    type="static-cohort",
+                                                    key="id",
+                                                    value=prop_cohort.pk,
+                                                    negation=negation_value,
+                                                )
+                                            ],
+                                        )
+                                    )
+                                else:
+                                    new_property_group_list.append(_unwrap(prop_cohort.properties, negation_value))
+                            except Cohort.DoesNotExist:
+                                new_property_group_list.append(
+                                    PropertyGroup(
+                                        type=PropertyOperatorType.AND,
+                                        values=[Property(key="fake_key_01r2ho", value=0, type="person")],
+                                    )
+                                )
+                        else:
+                            prop.negation = negation_value
+                            new_property_group_list.append(PropertyGroup(type=PropertyOperatorType.AND, values=[prop]))
+                    if not negate_group:
+                        return PropertyGroup(type=property_group.type, values=new_property_group_list)
+                    else:
+                        return PropertyGroup(
+                            type=PropertyOperatorType.AND
+                            if property_group.type == PropertyOperatorType.OR
+                            else PropertyOperatorType.OR,
+                            values=new_property_group_list,
+                        )
+
+            return property_group
+
+        new_props = _unwrap(filter.property_groups)
+        return filter.with_data({"properties": new_props.to_dict()})
 
     def get_query(self) -> Tuple[str, Dict[str, Any]]:
 
@@ -211,7 +313,7 @@ class CohortQuery(EnterpriseEventQuery):
                 if (
                     subq_alias == self.PERSON_TABLE_ALIAS
                     and "person" not in [prop.type for prop in getattr(self._outer_property_groups, "flat", [])]
-                    and "cohort" not in [prop.type for prop in getattr(self._outer_property_groups, "flat", [])]
+                    and "static-cohort" not in [prop.type for prop in getattr(self._outer_property_groups, "flat", [])]
                 ):
                     q = f"{q} {inner_join_query(subq_query, subq_alias, f'{subq_alias}.person_id', f'{prev_alias}.person_id')}"
                     fields = f"{subq_alias}.person_id"
@@ -323,8 +425,10 @@ class CohortQuery(EnterpriseEventQuery):
                 res, params = self.get_performed_event_regularly(prop, prepend, idx)
         elif prop.type == "person":
             res, params = self.get_person_condition(prop, prepend, idx)
-        elif prop.type == "cohort":
-            res, params = self.get_cohort_condition(prop, prepend, idx)
+        elif (
+            prop.type == "static-cohort"
+        ):  # "cohort" and "precalculated-cohort" are handled by flattening during initialization
+            res, params = self.get_static_cohort_condition(prop, prepend, idx)
         else:
             raise ValueError(f"Invalid property type for Cohort queries: {prop.type}")
 
@@ -338,17 +442,11 @@ class CohortQuery(EnterpriseEventQuery):
         else:
             return "", {}
 
-    def get_cohort_condition(self, prop: Property, prepend: str, idx: int) -> Tuple[str, Dict[str, Any]]:
-        try:
-            prop_cohort: Cohort = Cohort.objects.get(pk=prop.value, team_id=self._team_id)
-        except Cohort.DoesNotExist:
-            return "0 = 14", {}
-
+    def get_static_cohort_condition(self, prop: Property, prepend: str, idx: int) -> Tuple[str, Dict[str, Any]]:
         # If we reach this stage, it means there are no cyclic dependencies
         # They should've been caught by API update validation
         # and if not there, `simplifyFilter` would've failed
-        person_id_query, cohort_filter_params = format_filter_query(prop_cohort, idx, "person_id", using_new_query=True)
-        return f"id IN ({person_id_query})", cohort_filter_params
+        return format_static_cohort_query(cast(int, prop.value), idx, prepend, "id", negate=prop.negation or False)
 
     def get_performed_event_condition(self, prop: Property, prepend: str, idx: int) -> Tuple[str, Dict[str, Any]]:
         event = (prop.event_type, prop.key)
@@ -361,10 +459,11 @@ class CohortQuery(EnterpriseEventQuery):
 
         self._check_earliest_date((date_value, date_interval))
 
-        field = f"{'NOT' if prop.negation else ''} countIf(timestamp > now() - INTERVAL %({date_param})s {date_interval} AND timestamp < now() AND {entity_query}) > 0 AS {column_name}"
+        field = f"countIf(timestamp > now() - INTERVAL %({date_param})s {date_interval} AND timestamp < now() AND {entity_query}) > 0 AS {column_name}"
         self._fields.append(field)
 
-        return column_name, {f"{date_param}": date_value, **entity_params}
+        # Negation is handled in the where clause to ensure the right result if a full join occurs where the joined person did not perform the event
+        return f"{'NOT' if prop.negation else ''} {column_name}", {f"{date_param}": date_value, **entity_params}
 
     def get_performed_event_multiple(self, prop: Property, prepend: str, idx: int) -> Tuple[str, Dict[str, Any]]:
         event = (prop.event_type, prop.key)
@@ -378,11 +477,12 @@ class CohortQuery(EnterpriseEventQuery):
 
         self._check_earliest_date((date_value, date_interval))
 
-        field = f"{'NOT' if prop.negation else ''} countIf(timestamp > now() - INTERVAL %({date_param})s {date_interval} AND timestamp < now() AND {entity_query}) {get_count_operator(prop.operator)} %(operator_value)s AS {column_name}"
+        field = f"countIf(timestamp > now() - INTERVAL %({date_param})s {date_interval} AND timestamp < now() AND {entity_query}) {get_count_operator(prop.operator)} %(operator_value)s AS {column_name}"
         self._fields.append(field)
 
+        # Negation is handled in the where clause to ensure the right result if a full join occurs where the joined person did not perform the event
         return (
-            column_name,
+            f"{'NOT' if prop.negation else ''} {column_name}",
             {"operator_value": count, f"{date_param}": date_value, **entity_params},
         )
 
@@ -632,7 +732,8 @@ class CohortQuery(EnterpriseEventQuery):
 
     def _determine_should_join_persons(self) -> None:
         self._should_join_persons = (
-            self._column_optimizer.is_using_person_properties or self._column_optimizer.is_using_cohort_propertes
+            self._column_optimizer.is_using_person_properties
+            or len(self._column_optimizer._used_properties_with_type("static-cohort")) > 0
         )
 
     @cached_property
@@ -652,25 +753,9 @@ class CohortQuery(EnterpriseEventQuery):
     # Check if negations are always paired with a positive filter
     # raise a value error warning that this is an invalid cohort
     def _validate_negations(self) -> None:
-        def is_secondary_clause(prop: PropertyGroup):
-            if len(prop.values) and isinstance(prop.values[0], PropertyGroup):
-                for p in prop.values:
-                    if isinstance(p, PropertyGroup):
-                        is_secondary_clause(p)
-            else:
-                has_negation = False
-                has_primary_clause = False
-                for p in prop.values:
-                    if isinstance(p, Property):
-                        if p.negation:
-                            has_negation = True
-                        else:
-                            has_primary_clause = True
-
-                if has_negation and not has_primary_clause:
-                    raise ValueError("Negations must be paired with a positive filter.")
-
-        is_secondary_clause(self._filter.property_groups)
+        has_pending_negation, has_primary_clause = check_negation_clause(self._filter.property_groups)
+        if has_pending_negation:
+            raise ValueError("Negations must be paired with a positive filter.")
 
     def _get_entity(
         self, event: Tuple[Optional[str], Optional[Union[int, str]]], prepend: str, idx: int

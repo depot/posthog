@@ -61,7 +61,7 @@ describe('Trends', () => {
         cy.get('[data-attr=show-prop-filter-0]').click()
         cy.get('[data-attr=property-select-toggle-0]').click()
         expandPropertiesList()
-        cy.get('[data-attr=prop-filter-event_properties-1]').scrollIntoView().click({ force: true })
+        cy.get('.taxonomic-list-row').first().click({ force: true })
         cy.get('[data-attr=prop-val]').click()
         cy.get('.ant-select-item').contains('hogflix.com').click({ force: true })
         cy.get('[data-attr=trend-line-graph]', { timeout: 8000 }).should('exist')
@@ -74,7 +74,7 @@ describe('Trends', () => {
         cy.get('[data-attr=new-prop-filter-trends-filters]').click()
         cy.get('[data-attr=taxonomic-filter-searchfield]').click()
         expandPropertiesList()
-        cy.get('[data-attr=prop-filter-event_properties-1]').scrollIntoView().click({ force: true })
+        cy.get('.taxonomic-list-row').first().click({ force: true })
         cy.get('[data-attr=prop-val]').click()
         cy.get('.ant-select-item').contains('hogflix.com').click({ force: true })
 
@@ -120,7 +120,7 @@ describe('Trends', () => {
     it('Apply property breakdown', () => {
         cy.get('[data-attr=add-breakdown-button]').click()
         expandPropertiesList()
-        cy.get('[data-attr=prop-filter-event_properties-2]').click()
+        cy.get('.taxonomic-list-row').first().click()
         cy.get('[data-attr=trend-line-graph]').should('exist')
     })
 
@@ -136,7 +136,7 @@ describe('Trends', () => {
         cy.get('[data-attr=new-prop-filter-trends-filters]').click()
         cy.get('[data-attr=taxonomic-filter-searchfield]').click()
         expandPropertiesList()
-        cy.get('[data-attr=prop-filter-event_properties-1]').scrollIntoView().click({ force: true })
+        cy.get('.taxonomic-list-row').first().click({ force: true })
         cy.get('[data-attr=prop-val]').click()
         cy.get('.ant-select-item').contains('hogflix.com').click({ force: true })
 

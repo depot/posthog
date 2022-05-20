@@ -11,10 +11,11 @@ import { IconSchedule, IconTrendingFlat, IconTrendingFlatDown } from 'lib/compon
 import { humanFriendlyDuration, percentage, pluralize } from 'lib/utils'
 import { ValueInspectorButton } from './FunnelBarGraph'
 import clsx from 'clsx'
-import { getSeriesColor } from './funnelUtils'
 import { useScrollable } from 'lib/hooks/useScrollable'
 import { useResizeObserver } from 'lib/hooks/useResizeObserver'
+import { getSeriesColor } from 'lib/colors'
 import { useFunnelTooltip } from './FunnelTooltip'
+import { FunnelStepMore } from './FunnelStepMore'
 
 function StepBarLabels(): JSX.Element {
     return (
@@ -49,7 +50,7 @@ function StepBar({ step, stepIndex, series }: StepBarProps): JSX.Element {
             className="StepBar"
             style={
                 {
-                    '--series-color': getSeriesColor(series.order, step.nested_breakdown?.length === 1),
+                    '--series-color': getSeriesColor(series.order ?? 0),
                     '--conversion-rate': percentage(series.conversionRates.fromBasisStep, 1, true),
                 } as StepBarCSSProperties
             }
@@ -117,10 +118,18 @@ function StepLegend({ step, stepIndex, showTime, showPersonsModal }: StepLegendP
 
     return (
         <div className="StepLegend">
-            <LemonRow icon={<Lettermark name={stepIndex + 1} color={LettermarkColor.Gray} />}>
+            <LemonRow
+                icon={<Lettermark name={stepIndex + 1} color={LettermarkColor.Gray} />}
+                sideIcon={<FunnelStepMore stepIndex={stepIndex} />}
+            >
                 <EntityFilterInfo filter={getActionFilterFromFunnelStep(step)} />
             </LemonRow>
-            <LemonRow icon={<IconTrendingFlat />} status="success" title="Users who converted in this step">
+            <LemonRow
+                icon={<IconTrendingFlat />}
+                status="success"
+                style={{ color: 'unset' }} // Prevent status color from affecting text
+                title="Users who converted in this step"
+            >
                 {showPersonsModal ? (
                     <ValueInspectorButton
                         onClick={() => openPersonsModalForStep({ step, converted: true })}
@@ -135,7 +144,7 @@ function StepLegend({ step, stepIndex, showTime, showPersonsModal }: StepLegendP
             <LemonRow
                 icon={<IconTrendingFlatDown />}
                 status="danger"
-                style={{ color: 'inherit' }}
+                style={{ color: 'unset' }} // Prevent status color from affecting text
                 title="Users who dropped of at this step"
             >
                 {showPersonsModal ? (
@@ -150,8 +159,8 @@ function StepLegend({ step, stepIndex, showTime, showPersonsModal }: StepLegendP
                 )}
             </LemonRow>
             {showTime && (
-                <LemonRow icon={<IconSchedule />} title="Average time of conversion from previous step">
-                    {humanFriendlyDuration(step.average_conversion_time, 3) || '–'}
+                <LemonRow icon={<IconSchedule />} title="Median time of conversion from previous step">
+                    {humanFriendlyDuration(step.median_conversion_time, 3) || '–'}
                 </LemonRow>
             )}
         </div>

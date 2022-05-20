@@ -1,17 +1,16 @@
-import { PluginEvent } from '@posthog/plugin-scaffold'
 import * as Sentry from '@sentry/node'
 import { StatsD } from 'hot-shots'
 import { Consumer, Kafka, Producer } from 'kafkajs'
 
+import { KAFKA_HEALTHCHECK } from '../config/kafka-topics'
 import { Hub } from '../types'
 import { timeoutGuard } from '../utils/db/utils'
 import { status } from '../utils/status'
 import { delay } from '../utils/utils'
-import { PluginsServerConfig } from './../types'
 
 class KafkaConsumerError extends Error {}
 
-export async function runInstrumentedFunction({
+export async function runInstrumentedFunction<T, EventType>({
     server,
     timeoutMessage,
     event,
@@ -19,11 +18,11 @@ export async function runInstrumentedFunction({
     statsKey,
 }: {
     server: Hub
-    event: PluginEvent
+    event: EventType
     timeoutMessage: string
     statsKey: string
-    func: (event: PluginEvent) => Promise<any>
-}): Promise<any> {
+    func: (event: EventType) => Promise<T>
+}): Promise<T> {
     const timeout = timeoutGuard(timeoutMessage, {
         event: JSON.stringify(event),
     })
@@ -42,18 +41,15 @@ export async function runInstrumentedFunction({
 }
 
 export async function kafkaHealthcheck(
-    kafka: Kafka,
+    producer: Producer,
+    consumer: Consumer,
     statsd?: StatsD,
     timeoutMs = 20000
 ): Promise<[boolean, Error | null]> {
-    let consumer: Consumer | null = null
-    let producer: Producer | null = null
-
     try {
-        producer = kafka.producer()
-        await producer.connect()
+        // :TRICKY: This _only_ checks producer works
         await producer.send({
-            topic: 'healthcheck',
+            topic: KAFKA_HEALTHCHECK,
             messages: [
                 {
                     partition: 0,
@@ -63,41 +59,48 @@ export async function kafkaHealthcheck(
         })
 
         let kafkaConsumerWorking = false
-        consumer = kafka.consumer({
-            groupId: 'healthcheck-group',
-        })
-
-        await consumer.subscribe({ topic: 'healthcheck', fromBeginning: true })
-
-        await consumer.run({
-            // no-op
-            eachMessage: async () => {
-                await Promise.resolve()
-            },
-        })
-
         let timer: Date | null = new Date()
-        consumer.on(consumer.events.FETCH_START, () => {
-            if (timer) {
-                statsd?.timing('kafka_healthcheck_consumer_latency', timer)
-                timer = null
-            }
-            kafkaConsumerWorking = true
+        const waitForConsumerConnected = new Promise<void>((resolve) => {
+            consumer.on(consumer.events.FETCH_START, (...args) => {
+                if (timer) {
+                    statsd?.timing('kafka_healthcheck_consumer_latency', timer)
+                    timer = null
+                }
+                kafkaConsumerWorking = true
+                resolve()
+            })
         })
 
-        await consumer.connect()
+        consumer.resume([{ topic: KAFKA_HEALTHCHECK }])
 
-        await delay(timeoutMs)
+        await Promise.race([waitForConsumerConnected, delay(timeoutMs)])
 
         if (!kafkaConsumerWorking) {
-            throw new KafkaConsumerError('Unable to consume a message in time.')
+            throw new KafkaConsumerError('Consumer did not start fetching messages in time.')
         }
 
         return [true, null]
     } catch (error) {
         return [false, error]
     } finally {
-        await consumer?.disconnect()
-        await producer?.disconnect()
+        consumer.pause([{ topic: KAFKA_HEALTHCHECK }])
     }
+}
+
+export async function setupKafkaHealthcheckConsumer(kafka: Kafka): Promise<Consumer> {
+    const consumer = kafka.consumer({
+        groupId: 'healthcheck-group',
+        maxWaitTimeInMs: 100,
+    })
+
+    await consumer.subscribe({ topic: KAFKA_HEALTHCHECK })
+
+    await consumer.run({
+        // no-op
+        eachMessage: async () => {
+            await Promise.resolve()
+        },
+    })
+
+    return consumer
 }

@@ -11,7 +11,7 @@ import { loaders } from 'kea-loaders'
 export const projectHomepageLogic = kea<projectHomepageLogicType>([
     path(['scenes', 'project-homepage', 'projectHomepageLogic']),
     connect({
-        values: [teamLogic, ['currentTeamId']],
+        values: [teamLogic, ['currentTeamId', 'currentTeam']],
     }),
 
     selectors({

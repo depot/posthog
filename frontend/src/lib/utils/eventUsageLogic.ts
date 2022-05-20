@@ -23,6 +23,7 @@ import {
     Experiment,
     PropertyGroupFilter,
     FilterLogicalOperator,
+    PropertyFilterValue,
 } from '~/types'
 import { dayjs } from 'lib/dayjs'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
@@ -31,6 +32,7 @@ import { EventIndex } from '@posthog/react-rrweb-player'
 import { convertPropertyGroupToProperties } from 'lib/utils'
 
 import { TaxonomicFilterGroupType } from 'lib/components/TaxonomicFilter/types'
+import { PlatformType, Framework } from 'scenes/ingestion/types'
 export enum DashboardEventSource {
     LongPress = 'long_press',
     MoreDropdown = 'more_dropdown',
@@ -102,6 +104,13 @@ function hasGroupProperties(properties: AnyPropertyFilter[] | PropertyGroupFilte
     return !!flattenedProperties && flattenedProperties.some((property) => property.group_type_index != undefined)
 }
 
+function usedCohortFilterIds(properties: AnyPropertyFilter[] | PropertyGroupFilter | undefined): PropertyFilterValue[] {
+    const flattenedProperties = convertPropertyGroupToProperties(properties)
+    const cohortIds = flattenedProperties?.filter((p) => p.type === 'cohort').map((p) => p.value)
+
+    return cohortIds || []
+}
+
 /*
     Takes a full list of filters for an insight and sanitizes any potentially sensitive info to report usage
 */
@@ -113,7 +122,6 @@ function sanitizeFilterParams(filters: Partial<FilterType>): Record<string, any>
         date_to,
         filter_test_accounts,
         formula,
-        insight,
         funnel_viz_type,
         funnel_from_step,
         funnel_to_step,
@@ -150,6 +158,7 @@ function sanitizeFilterParams(filters: Partial<FilterType>): Record<string, any>
     const breakdown_by_groups = filters.breakdown_group_type_index != undefined
     // If groups are being used in this query
     let using_groups = hasGroupProperties(filters.properties)
+    const used_cohort_filter_ids = usedCohortFilterIds(filters.properties)
 
     for (const entity of entities) {
         properties_local = properties_local.concat(flattenProperties(entity.properties || []))
@@ -162,7 +171,6 @@ function sanitizeFilterParams(filters: Partial<FilterType>): Record<string, any>
     const properties_global = flattenProperties(properties)
 
     return {
-        insight,
         display,
         interval,
         date_from,
@@ -183,6 +191,7 @@ function sanitizeFilterParams(filters: Partial<FilterType>): Record<string, any>
         aggregating_by_groups,
         breakdown_by_groups,
         using_groups: using_groups || aggregating_by_groups || breakdown_by_groups,
+        used_cohort_filter_ids,
     }
 }
 
@@ -272,6 +281,7 @@ export const eventUsageLogic = kea<
             dateFrom,
             dateTo,
         }),
+        reportDashboardPropertiesChanged: true,
         reportDashboardPinToggled: (pinned: boolean, source: DashboardEventSource) => ({
             pinned,
             source,
@@ -284,7 +294,7 @@ export const eventUsageLogic = kea<
         ) => ({ attribute, originalLength, newLength }),
         reportDashboardShareToggled: (isShared: boolean) => ({ isShared }),
         reportUpgradeModalShown: (featureName: string) => ({ featureName }),
-        reportIngestionLandingSeen: (isGridView: boolean) => ({ isGridView }),
+        reportIngestionLandingSeen: true,
         reportTimezoneComponentViewed: (
             component: 'label' | 'indicator',
             project_timezone?: string,
@@ -432,6 +442,16 @@ export const eventUsageLogic = kea<
         reportInsightOpenedFromRecentInsightList: true,
         reportRecordingOpenedFromRecentRecordingList: true,
         reportPersonOpenedFromNewlySeenPersonsList: true,
+        reportTeamHasIngestedEvents: true,
+        reportIngestionSelectPlatformType: (platform: PlatformType) => ({ platform }),
+        reportIngestionSelectFrameworkType: (framework: Framework) => ({ framework }),
+        reportIngestionHelpClicked: (type: string) => ({ type }),
+        reportIngestionTryWithBookmarkletClicked: true,
+        reportIngestionContinueWithoutVerifying: true,
+        reportIngestionThirdPartyAboutClicked: (name: string) => ({ name }),
+        reportIngestionThirdPartyConfigureClicked: (name: string) => ({ name }),
+        reportIngestionThirdPartyPluginInstalled: (name: string) => ({ name }),
+        reportFailedToCreateFeatureFlagWithCohort: (code: string, detail: string) => ({ code, detail }),
     },
     listeners: ({ values }) => ({
         reportAnnotationViewed: async ({ annotations }, breakpoint) => {
@@ -599,13 +619,13 @@ export const eventUsageLogic = kea<
                 pinned,
                 creation_mode,
                 sample_items_count: 0,
-                item_count: dashboard.items.length,
+                item_count: dashboard.items?.length || 0,
                 created_by_system: !dashboard.created_by,
                 has_share_token: hasShareToken,
                 dashboard_id: id,
             }
 
-            for (const item of dashboard.items) {
+            for (const item of dashboard.items || []) {
                 const key = `${item.filters?.insight?.toLowerCase() || InsightType.TRENDS}_count`
                 if (!properties[key]) {
                     properties[key] = 1
@@ -695,6 +715,9 @@ export const eventUsageLogic = kea<
                 date_to: dateTo?.toString(),
             })
         },
+        reportDashboardPropertiesChanged: async () => {
+            posthog.capture(`dashboard properties changed`)
+        },
         reportDashboardPinToggled: async (payload) => {
             posthog.capture(`dashboard pin toggled`, payload)
         },
@@ -728,8 +751,8 @@ export const eventUsageLogic = kea<
             }
             posthog.capture('test account filters updated', payload)
         },
-        reportIngestionLandingSeen: async ({ isGridView }) => {
-            posthog.capture('ingestion landing seen', { grid_view: isGridView })
+        reportIngestionLandingSeen: async () => {
+            posthog.capture('ingestion landing seen')
         },
         reportProjectHomeItemClicked: async ({ module, item, extraProps }) => {
             const defaultProps = { module, item }
@@ -1008,6 +1031,48 @@ export const eventUsageLogic = kea<
         },
         reportPersonOpenedFromNewlySeenPersonsList: () => {
             posthog.capture('person opened from newly seen persons list')
+        },
+        reportTeamHasIngestedEvents: () => {
+            posthog.capture('team has ingested events')
+        },
+        reportIngestionSelectPlatformType: ({ platform }) => {
+            posthog.capture('ingestion select platform type', {
+                platform: platform,
+            })
+        },
+        reportIngestionSelectFrameworkType: ({ framework }) => {
+            posthog.capture('ingestion select framework type', {
+                framework: framework,
+            })
+        },
+        reportIngestionHelpClicked: ({ type }) => {
+            posthog.capture('ingestion help clicked', {
+                type: type,
+            })
+        },
+        reportIngestionTryWithBookmarkletClicked: () => {
+            posthog.capture('ingestion try posthog with bookmarklet clicked')
+        },
+        reportIngestionContinueWithoutVerifying: () => {
+            posthog.capture('ingestion continue without verifying')
+        },
+        reportIngestionThirdPartyAboutClicked: ({ name }) => {
+            posthog.capture('ingestion third party about clicked', {
+                name: name,
+            })
+        },
+        reportIngestionThirdPartyConfigureClicked: ({ name }) => {
+            posthog.capture('ingestion third party configure clicked', {
+                name: name,
+            })
+        },
+        reportIngestionThirdPartyPluginInstalled: ({ name }) => {
+            posthog.capture('report ingestion third party plugin installed', {
+                name: name,
+            })
+        },
+        reportFailedToCreateFeatureFlagWithCohort: ({ detail, code }) => {
+            posthog.capture('failed to create feature flag with cohort', { detail, code })
         },
     }),
 })
