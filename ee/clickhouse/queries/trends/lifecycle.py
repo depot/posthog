@@ -6,6 +6,7 @@ from rest_framework.request import Request
 
 from ee.clickhouse.models.entity import get_entity_filtering_params
 from ee.clickhouse.models.person import get_persons_by_uuids
+from ee.clickhouse.models.property import get_property_string_expr
 from ee.clickhouse.queries.event_query import EnterpriseEventQuery
 from ee.clickhouse.queries.trends.util import parse_response
 from ee.clickhouse.sql.trends.lifecycle import LIFECYCLE_PEOPLE_SQL, LIFECYCLE_SQL
@@ -117,12 +118,21 @@ class LifecycleEventQuery(EnterpriseEventQuery):
         )
         self.params.update(entity_params)
 
+        created_at_clause = "person.created_at"
+
+        if self._using_person_on_events:
+            person_property = "created_at"
+            # TODO: is it possible for created_at to not exist?
+            created_at_clause, _ = get_property_string_expr(
+                "events", person_property, f"'{person_property}'", "person_properties"
+            )
+
         return (
             f"""
             SELECT DISTINCT
                 {self.DISTINCT_ID_TABLE_ALIAS if not self._using_person_on_events else self.EVENT_TABLE_ALIAS}.person_id as person_id,
                 dateTrunc(%(interval)s, toDateTime(events.timestamp, %(timezone)s)) AS period,
-                toDateTime(person.created_at, %(timezone)s) AS created_at
+                toDateTime({created_at_clause}, %(timezone)s) AS created_at
             FROM events AS {self.EVENT_TABLE_ALIAS}
             {self._get_distinct_id_query()}
             {person_query}
