@@ -941,4 +941,4 @@ export interface PreIngestionEvent {
     elementsList: Element[]
 }
 
-export type IngestionEvent = Omit<PreIngestionEvent, 'elementsList'>
+export type IngestionEvent = PreIngestionEvent
