@@ -200,6 +200,7 @@ export interface PluginServerCapabilities {
     pluginScheduledTasks?: boolean
     processJobs?: boolean
     processAsyncHandlers?: boolean
+    http?: boolean
 }
 
 export interface Pausable {
