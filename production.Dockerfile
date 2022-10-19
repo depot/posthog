@@ -12,7 +12,8 @@ FROM node:18.8-alpine3.16 AS frontend
 WORKDIR /code
 
 COPY package.json yarn.lock ./
-RUN yarn config set network-timeout 300000 && \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn/v6 \
+    yarn config set network-timeout 300000 && \
     yarn install --frozen-lockfile
 
 COPY frontend/ frontend/
@@ -42,7 +43,8 @@ RUN apk --update --no-cache add \
 # - we explicitly COPY the files so that we don't need to rebuild
 #   the container every time a dependency changes
 COPY ./plugin-server/package.json ./plugin-server/yarn.lock ./plugin-server/tsconfig.json ./
-RUN yarn config set network-timeout 300000 && \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn/v6 \
+    yarn config set network-timeout 300000 && \
     yarn install
 
 # Build the plugin server
@@ -148,9 +150,9 @@ RUN apk --update --no-cache add "yarn~=1"
 
 # NOTE: we need make and g++ for node-gyp
 # NOTE: npm is required for re2
-RUN apk --update --no-cache add "make~=4.3" "g++~=11.2" "npm~=8" --virtual .build-deps \
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn/v6 \
+    apk --update --no-cache add "make~=4.3" "g++~=11.2" "npm~=8" --virtual .build-deps \
     && yarn install --frozen-lockfile --production=true \
-    && yarn cache clean \
     && apk del .build-deps
 
 USER posthog
